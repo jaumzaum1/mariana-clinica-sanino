@@ -25,7 +25,7 @@ npm test
 
 ## Teste Local
 
-Com `.env` preenchido com `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, `OPENAI_MODEL_PARSER`, `OPENAI_MODEL_MARIANA` e `SEND_WHATSAPP_ENABLED=false`, aplique as migrations em `src/db/migrations/` no Supabase.
+Com `.env` preenchido com `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, `OPENAI_MODEL_PARSER`, `OPENAI_MODEL_MARIANA` e `SEND_WHATSAPP_ENABLED=false`, aplique as migrations em `src/db/migrations/` no Supabase. A migration `010_calendar_reuse_validation_and_br_views.sql` recria as views `appointments_br` e `audit_logs_br` (com `DROP VIEW IF EXISTS` antes de `CREATE VIEW`) para incluir colunas `*_br_text` sem alterar as tabelas base.
 
 Para Google Calendar com service account:
 
@@ -146,7 +146,17 @@ curl -X POST http://localhost:3000/internal/scheduling/test-create-event \
   }'
 ```
 
-Para testar idempotência, rode o mesmo `curl` duas vezes. A segunda chamada deve retornar o mesmo `appointmentId`/`eventId` quando já existir appointment `scheduled` para o mesmo paciente, início e fim.
+Para testar idempotência, rode o mesmo `curl` duas vezes. A segunda chamada valida se o evento ainda existe no Google Calendar:
+
+- se o evento existir e estiver ativo: retorna o mesmo `appointmentId`/`eventId` com `reused: true`;
+- se o evento tiver sido deletado manualmente no Google Calendar: recria o evento, atualiza `appointments.calendar_event_id` e retorna um novo `eventId`.
+
+As colunas base `timestamptz` nas tabelas `appointments` e `audit_logs` aparecem em UTC no Supabase (ex.: `2026-05-19 19:29:25.459967+00`). Isso é correto para persistência, mas ruim para leitura operacional.
+
+Para operação no fuso da Clínica Sanino, use as views `appointments_br` e `audit_logs_br`. Elas expõem:
+
+- colunas `*_br` com `timestamptz` convertido para `America/Sao_Paulo`;
+- colunas `*_br_text` formatadas como `YYYY-MM-DD HH24:MI:SS` para leitura humana.
 
 No Supabase, verifique:
 
@@ -154,18 +164,33 @@ No Supabase, verifique:
 - `appointments.calendar_event_id` preenchido
 - `appointments.status = scheduled`
 - `audit_logs.event` com `scheduling_test_create_event_requested`, `patient_resolved_for_appointment`, `calendar_event_create_attempt`, `calendar_event_created`, `appointment_saved`, `scheduling_test_create_event_completed`
+- em reuso: `calendar_event_reuse_validation_started`, `calendar_event_reuse_validated`, `appointment_reused`, `calendar_event_reused`
+- se o evento foi deletado no Calendar: `calendar_event_missing`, `calendar_event_recreated`, `appointment_calendar_event_id_updated`
 
 Para leitura operacional no fuso da Clínica Sanino:
 
 ```sql
-select id, phone, starts_at_br, ends_at_br, created_at_br
+select id, phone, starts_at_br_text, ends_at_br_text, created_at_br_text
 from appointments_br
 order by created_at desc;
 
-select event, phone, created_at_br, metadata
+select event, phone, created_at_br_text, metadata
 from audit_logs_br
 order by created_at desc;
 ```
+
+### Teste manual: evento deletado no Google Calendar
+
+1. Crie um evento com `POST /internal/scheduling/test-create-event` (curl abaixo).
+2. Confirme `eventId` na resposta e o evento no Google Calendar.
+3. Delete o evento manualmente no Google Calendar.
+4. Rode o mesmo `curl` novamente.
+5. Confirme:
+   - novo `eventId` diferente do anterior;
+   - `reused: false`;
+   - mesmo `appointmentId`;
+   - `appointments.calendar_event_id` atualizado no Supabase;
+   - audit logs `calendar_event_missing`, `calendar_event_recreated`, `appointment_calendar_event_id_updated`.
 
 No Google Calendar, confira:
 

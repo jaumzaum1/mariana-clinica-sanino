@@ -84,4 +84,47 @@ export class SupabaseAppointmentsRepository implements AppointmentsRepository {
 
     return data ? toRecord(data) : null;
   }
+
+  async updateCalendarEventId(input: {
+    appointmentId: string;
+    calendarEventId: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<AppointmentRecord> {
+    const { data: existing, error: existingError } = await this.supabase
+      .from("appointments")
+      .select(APPOINTMENT_COLUMNS)
+      .eq("id", input.appointmentId)
+      .maybeSingle<AppointmentRow>();
+
+    if (existingError) {
+      throw existingError;
+    }
+
+    if (!existing) {
+      throw new Error(`Appointment ${input.appointmentId} not found.`);
+    }
+
+    const mergedMetadata = {
+      ...(existing.metadata ?? {}),
+      ...(input.metadata ?? {}),
+      calendar_event_id_updated_at: new Date().toISOString()
+    };
+
+    const { data, error } = await this.supabase
+      .from("appointments")
+      .update({
+        calendar_event_id: input.calendarEventId,
+        metadata: mergedMetadata,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", input.appointmentId)
+      .select(APPOINTMENT_COLUMNS)
+      .single<AppointmentRow>();
+
+    if (error) {
+      throw error;
+    }
+
+    return toRecord(data);
+  }
 }

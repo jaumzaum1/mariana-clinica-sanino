@@ -147,6 +147,11 @@ export interface AppointmentsRepository {
     startsAt: string;
     endsAt: string;
   }): Promise<AppointmentRecord | null>;
+  updateCalendarEventId(input: {
+    appointmentId: string;
+    calendarEventId: string;
+    metadata?: Record<string, unknown>;
+  }): Promise<AppointmentRecord>;
 }
 
 export interface MessageBatchesRepository {

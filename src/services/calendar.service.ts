@@ -11,6 +11,38 @@ export interface CalendarEvent extends CalendarSlot {
   summary?: string | null;
 }
 
+export interface CalendarEventDetails extends CalendarEvent {
+  status?: string | null;
+  description?: string | null;
+  location?: string | null;
+  extendedProperties?: Record<string, string>;
+}
+
+export interface UpdateCalendarEventInput {
+  summary?: string;
+  description?: string;
+  location?: string;
+  metadata?: Record<string, unknown>;
+}
+
+export class CalendarEventNotFoundError extends Error {
+  readonly eventId: string;
+
+  constructor(eventId: string) {
+    super(`Calendar event ${eventId} not found.`);
+    this.name = "CalendarEventNotFoundError";
+    this.eventId = eventId;
+  }
+}
+
+export function isEventAbsentForAgenda(event: CalendarEventDetails | null | undefined): boolean {
+  if (!event) {
+    return true;
+  }
+
+  return event.status === "cancelled";
+}
+
 export interface CalendarAppointmentInput extends CalendarSlot {
   patientName: string;
   phone: string;
@@ -133,60 +165,101 @@ export class CalendarService {
     };
   }
 
-  async getEvent(id: string): Promise<CalendarEvent | null> {
+  async getEvent(id: string): Promise<CalendarEventDetails | null> {
     if (!this.calendar || !this.config.calendarId) {
       throw new Error("Google Calendar nao configurado.");
     }
 
-    const response = await this.calendar.events.get({
-      calendarId: this.config.calendarId,
-      eventId: id
-    });
+    try {
+      const response = await this.calendar.events.get({
+        calendarId: this.config.calendarId,
+        eventId: id
+      });
 
-    const event = response.data;
-    if (!event.start?.dateTime || !event.end?.dateTime) {
-      return null;
+      const event = response.data;
+      if (!event.start?.dateTime || !event.end?.dateTime) {
+        return null;
+      }
+
+      return {
+        id: event.id ?? id,
+        summary: event.summary,
+        start: event.start.dateTime,
+        end: event.end.dateTime,
+        status: event.status,
+        description: event.description,
+        location: event.location,
+        extendedProperties: event.extendedProperties?.private ?? {}
+      };
+    } catch (error) {
+      if (isGoogleCalendarNotFoundError(error)) {
+        throw new CalendarEventNotFoundError(id);
+      }
+
+      throw error;
+    }
+  }
+
+  async updateEvent(id: string, input: UpdateCalendarEventInput): Promise<void> {
+    if (!this.calendar || !this.config.calendarId) {
+      throw new Error("Google Calendar nao configurado.");
     }
 
-    return {
-      id: event.id ?? id,
-      summary: event.summary,
-      start: event.start.dateTime,
-      end: event.end.dateTime
-    };
+    const requestBody: calendar_v3.Schema$Event = {};
+
+    if (input.summary !== undefined) {
+      requestBody.summary = input.summary;
+    }
+
+    if (input.description !== undefined) {
+      requestBody.description = input.description;
+    }
+
+    if (input.location !== undefined) {
+      requestBody.location = input.location;
+    }
+
+    if (input.metadata) {
+      const existing = await this.calendar.events.get({
+        calendarId: this.config.calendarId,
+        eventId: id
+      });
+      const currentPrivate = existing.data.extendedProperties?.private ?? {};
+
+      requestBody.extendedProperties = {
+        private: {
+          ...currentPrivate,
+          ...Object.fromEntries(
+            Object.entries(input.metadata).map(([key, value]) => [key, String(value)])
+          )
+        }
+      };
+    }
+
+    await this.calendar.events.patch({
+      calendarId: this.config.calendarId,
+      eventId: id,
+      requestBody
+    });
   }
 
   async updateEventMetadata(
     id: string,
     metadata: Record<string, unknown>
   ): Promise<void> {
-    if (!this.calendar || !this.config.calendarId) {
-      throw new Error("Google Calendar nao configurado.");
-    }
-
-    const existing = await this.calendar.events.get({
-      calendarId: this.config.calendarId,
-      eventId: id
-    });
-    const currentPrivate = existing.data.extendedProperties?.private ?? {};
-
-    await this.calendar.events.patch({
-      calendarId: this.config.calendarId,
-      eventId: id,
-      requestBody: {
-        extendedProperties: {
-          private: {
-            ...currentPrivate,
-            ...Object.fromEntries(
-              Object.entries(metadata).map(([key, value]) => [key, String(value)])
-            )
-          }
-        }
-      }
-    });
+    await this.updateEvent(id, { metadata });
   }
 
   async createAppointment(input: CalendarAppointmentInput): Promise<CalendarAppointment> {
     return this.createEvent(input);
   }
+}
+
+function isGoogleCalendarNotFoundError(error: unknown): boolean {
+  if (!error || typeof error !== "object") {
+    return false;
+  }
+
+  const candidate = error as { code?: number; response?: { status?: number } };
+  return candidate.code === 404 || candidate.response?.status === 404;
 }

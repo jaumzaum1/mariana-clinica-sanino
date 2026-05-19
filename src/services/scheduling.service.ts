@@ -4,7 +4,8 @@ import type {
   PatientRecord,
   PatientsRepository
 } from "../repositories/types.js";
-import type { CalendarService, CalendarSlot } from "./calendar.service.js";
+import type { CalendarService, CalendarSlot, CalendarEventDetails } from "./calendar.service.js";
+import { CalendarEventNotFoundError, isEventAbsentForAgenda } from "./calendar.service.js";
 import type { AuditLogService } from "./audit-log.service.js";
 import { generateBrazilWhatsappVariants, normalizeBrazilPhone } from "../utils/phone.js";
 
@@ -49,6 +50,7 @@ export interface CreateAppointmentIfReadyInput {
 
 export interface CreateAppointmentIfReadyResult {
   created: boolean;
+  reused?: boolean;
   eventId?: string;
   appointmentId?: string;
   patientId?: string;
@@ -66,10 +68,23 @@ const SLOT_STEP_MINUTES = 30;
 const CLINIC_START_HOUR = 9;
 const CLINIC_END_HOUR = 19;
 
+const CLINIC_LOCATION = "Clínica Sanino - Rua dos Bancários, 529 - Jardim Maria Izabel, Marília - SP";
+const REQUIRED_EVENT_PRIVATE_KEYS = [
+  "source",
+  "createdBySystem",
+  "phone",
+  "cpf",
+  "patientName",
+  "patientId",
+  "appointmentId",
+  "appointmentType",
+  "status"
+] as const;
+
 export class SchedulingService {
   constructor(
-    private readonly calendarService: Pick<CalendarService, "findBusySlots" | "createEvent"> &
-      Partial<Pick<CalendarService, "updateEventMetadata">>,
+    private readonly calendarService: Pick<CalendarService, "findBusySlots" | "createEvent" | "getEvent"> &
+      Partial<Pick<CalendarService, "updateEventMetadata" | "updateEvent">>,
     private readonly appointmentsRepository?: AppointmentsRepository,
     private readonly patientsRepository?: PatientsRepository,
     private readonly auditLogService?: AuditLogService
@@ -203,35 +218,18 @@ export class SchedulingService {
     });
 
     if (existingAppointment?.calendarEventId) {
-      await this.audit("calendar_event_reused", phone, {
-        patientId: patient.id,
-        appointmentId: existingAppointment.id,
-        calendarEventId: existingAppointment.calendarEventId,
-        start: selectedSlot.start,
-        end: selectedSlot.end,
-        source,
-        route,
-        summary
-      });
-      await this.audit("appointment_reused", phone, {
-        patientId: patient.id,
-        appointmentId: existingAppointment.id,
-        calendarEventId: existingAppointment.calendarEventId,
-        start: selectedSlot.start,
-        end: selectedSlot.end,
-        source,
-        route,
-        summary
-      });
-      return {
-        created: true,
-        eventId: existingAppointment.calendarEventId,
-        appointmentId: existingAppointment.id,
-        patientId: patient.id,
+      return this.reuseOrRecreateExistingAppointment({
+        existingAppointment,
+        patient,
+        phone,
+        patientName,
         summary,
-        missingFields: [],
-        selectedSlot
-      };
+        selectedSlot,
+        registrationData: input.registrationData,
+        parserOutput: input.parserOutput,
+        source,
+        route
+      });
     }
 
     const slotIsFree = await this.validateSlotStillFree(selectedSlot);
@@ -255,33 +253,14 @@ export class SchedulingService {
 
     let event: Awaited<ReturnType<CalendarService["createEvent"]>>;
     try {
-      event = await this.calendarService.createEvent({
-      patientName,
-      phone,
-      start: selectedSlot.start,
-      end: selectedSlot.end,
-      summary,
-      description: [
-        `Paciente: ${patientName}`,
-        `Telefone: ${phone}`,
-        `CPF: ${input.registrationData.cpf}`,
-        `Data de nascimento: ${input.registrationData.birth_date}`,
-        "Origem: Mariana",
-        "Tipo: primeira_consulta",
-        "Status: scheduled",
-        `Resumo: ${input.parserOutput.raw_summary}`
-      ].join("\n"),
-      location: "Clínica Sanino - Rua dos Bancários, 529 - Jardim Maria Izabel, Marília - SP",
-      metadata: {
-        patientId: patient.id,
+      event = await this.createCalendarEvent({
+        patient,
         phone,
-        cpf: input.registrationData.cpf,
         patientName,
-        source: "mariana",
-        createdBySystem: true,
-        appointmentType: "primeira_consulta",
-        status: "scheduled"
-      }
+        summary,
+        selectedSlot,
+        registrationData: input.registrationData,
+        parserOutput: input.parserOutput
       });
     } catch (error) {
       await this.audit("calendar_event_failed", phone, {
@@ -358,6 +337,7 @@ export class SchedulingService {
 
     return {
       created: true,
+      reused: false,
       eventId: event.id,
       appointmentId: appointment?.id,
       patientId: patient.id,
@@ -365,6 +345,372 @@ export class SchedulingService {
       missingFields: [],
       selectedSlot
     };
+  }
+
+  private async reuseOrRecreateExistingAppointment(input: {
+    existingAppointment: NonNullable<Awaited<ReturnType<AppointmentsRepository["findScheduledByPatientSlot"]>>>;
+    patient: PatientRecord;
+    phone: string;
+    patientName: string;
+    summary: string;
+    selectedSlot: CalendarSlot;
+    registrationData: AgendaParserOutput["registration_data"];
+    parserOutput: AgendaParserOutput;
+    source: string;
+    route?: string;
+  }): Promise<CreateAppointmentIfReadyResult> {
+    const {
+      existingAppointment,
+      patient,
+      phone,
+      patientName,
+      summary,
+      selectedSlot,
+      registrationData,
+      parserOutput,
+      source,
+      route
+    } = input;
+    const oldCalendarEventId = existingAppointment.calendarEventId!;
+
+    await this.audit("calendar_event_reuse_validation_started", phone, {
+      phone,
+      patientId: patient.id,
+      appointmentId: existingAppointment.id,
+      oldCalendarEventId,
+      start: selectedSlot.start,
+      end: selectedSlot.end,
+      source,
+      route
+    });
+
+    try {
+      const calendarEvent = await this.calendarService.getEvent(oldCalendarEventId);
+
+      if (!isEventAbsentForAgenda(calendarEvent)) {
+        await this.ensureCalendarEventMetadata({
+          calendarEvent: calendarEvent!,
+          appointmentId: existingAppointment.id,
+          patient,
+          phone,
+          patientName,
+          summary,
+          selectedSlot,
+          registrationData,
+          parserOutput,
+          source,
+          route
+        });
+
+        await this.audit("calendar_event_reuse_validated", phone, {
+          phone,
+          patientId: patient.id,
+          appointmentId: existingAppointment.id,
+          oldCalendarEventId,
+          start: selectedSlot.start,
+          end: selectedSlot.end,
+          source,
+          route
+        });
+        await this.audit("appointment_reused", phone, {
+          phone,
+          patientId: patient.id,
+          appointmentId: existingAppointment.id,
+          oldCalendarEventId,
+          start: selectedSlot.start,
+          end: selectedSlot.end,
+          source,
+          route
+        });
+        await this.audit("calendar_event_reused", phone, {
+          phone,
+          patientId: patient.id,
+          appointmentId: existingAppointment.id,
+          oldCalendarEventId,
+          start: selectedSlot.start,
+          end: selectedSlot.end,
+          source,
+          route
+        });
+
+        return {
+          created: true,
+          reused: true,
+          eventId: oldCalendarEventId,
+          appointmentId: existingAppointment.id,
+          patientId: patient.id,
+          summary,
+          missingFields: [],
+          selectedSlot
+        };
+      }
+
+      return this.recreateMissingCalendarEvent({
+        existingAppointment,
+        patient,
+        phone,
+        patientName,
+        summary,
+        selectedSlot,
+        registrationData,
+        parserOutput,
+        source,
+        route,
+        oldCalendarEventId,
+        reason: calendarEvent?.status === "cancelled" ? "cancelled" : "missing"
+      });
+    } catch (error) {
+      if (error instanceof CalendarEventNotFoundError) {
+        return this.recreateMissingCalendarEvent({
+          existingAppointment,
+          patient,
+          phone,
+          patientName,
+          summary,
+          selectedSlot,
+          registrationData,
+          parserOutput,
+          source,
+          route,
+          oldCalendarEventId,
+          reason: "not_found"
+        });
+      }
+
+      await this.audit("calendar_event_validation_failed", phone, {
+        phone,
+        patientId: patient.id,
+        appointmentId: existingAppointment.id,
+        oldCalendarEventId,
+        start: selectedSlot.start,
+        end: selectedSlot.end,
+        source,
+        route,
+        error: error instanceof Error ? error.message : "Erro desconhecido ao validar evento."
+      });
+      throw error;
+    }
+  }
+
+  private async recreateMissingCalendarEvent(input: {
+    existingAppointment: NonNullable<Awaited<ReturnType<AppointmentsRepository["findScheduledByPatientSlot"]>>>;
+    patient: PatientRecord;
+    phone: string;
+    patientName: string;
+    summary: string;
+    selectedSlot: CalendarSlot;
+    registrationData: AgendaParserOutput["registration_data"];
+    parserOutput: AgendaParserOutput;
+    source: string;
+    route?: string;
+    oldCalendarEventId: string;
+    reason: "missing" | "cancelled" | "not_found";
+  }): Promise<CreateAppointmentIfReadyResult> {
+    const {
+      existingAppointment,
+      patient,
+      phone,
+      patientName,
+      summary,
+      selectedSlot,
+      registrationData,
+      parserOutput,
+      source,
+      route,
+      oldCalendarEventId,
+      reason
+    } = input;
+
+    await this.audit("calendar_event_missing", phone, {
+      phone,
+      patientId: patient.id,
+      appointmentId: existingAppointment.id,
+      oldCalendarEventId,
+      start: selectedSlot.start,
+      end: selectedSlot.end,
+      source,
+      route,
+      reason
+    });
+
+    const event = await this.createCalendarEvent({
+      patient,
+      phone,
+      patientName,
+      summary,
+      selectedSlot,
+      registrationData,
+      parserOutput,
+      appointmentId: existingAppointment.id
+    });
+
+    await this.audit("calendar_event_recreated", phone, {
+      phone,
+      patientId: patient.id,
+      appointmentId: existingAppointment.id,
+      oldCalendarEventId,
+      newCalendarEventId: event.id,
+      start: selectedSlot.start,
+      end: selectedSlot.end,
+      source,
+      route,
+      reason
+    });
+
+    if (!this.appointmentsRepository) {
+      throw new Error("AppointmentsRepository is required to update calendar_event_id.");
+    }
+
+    await this.appointmentsRepository.updateCalendarEventId({
+      appointmentId: existingAppointment.id,
+      calendarEventId: event.id,
+      metadata: {
+        previous_calendar_event_id: oldCalendarEventId,
+        calendar_event_recreated_reason: reason,
+        route
+      }
+    });
+
+    await this.audit("appointment_calendar_event_id_updated", phone, {
+      phone,
+      patientId: patient.id,
+      appointmentId: existingAppointment.id,
+      oldCalendarEventId,
+      newCalendarEventId: event.id,
+      start: selectedSlot.start,
+      end: selectedSlot.end,
+      source,
+      route,
+      reason
+    });
+
+    return {
+      created: true,
+      reused: false,
+      eventId: event.id,
+      appointmentId: existingAppointment.id,
+      patientId: patient.id,
+      summary,
+      missingFields: [],
+      selectedSlot
+    };
+  }
+
+  private async createCalendarEvent(input: {
+    patient: PatientRecord;
+    phone: string;
+    patientName: string;
+    summary: string;
+    selectedSlot: CalendarSlot;
+    registrationData: AgendaParserOutput["registration_data"];
+    parserOutput: AgendaParserOutput;
+    appointmentId?: string;
+  }) {
+    return this.calendarService.createEvent({
+      patientName: input.patientName,
+      phone: input.phone,
+      start: input.selectedSlot.start,
+      end: input.selectedSlot.end,
+      summary: input.summary,
+      description: this.buildEventDescription(input),
+      location: CLINIC_LOCATION,
+      metadata: this.buildEventMetadata(input)
+    });
+  }
+
+  private buildEventDescription(input: {
+    patientName: string;
+    phone: string;
+    registrationData: AgendaParserOutput["registration_data"];
+    parserOutput: AgendaParserOutput;
+  }): string {
+    return [
+      `Paciente: ${input.patientName}`,
+      `Telefone: ${input.phone}`,
+      `CPF: ${input.registrationData.cpf}`,
+      `Data de nascimento: ${input.registrationData.birth_date}`,
+      "Origem: Mariana",
+      "Tipo: primeira_consulta",
+      "Status: scheduled",
+      `Resumo: ${input.parserOutput.raw_summary}`
+    ].join("\n");
+  }
+
+  private buildEventMetadata(input: {
+    patient: PatientRecord;
+    phone: string;
+    patientName: string;
+    registrationData: AgendaParserOutput["registration_data"];
+    appointmentId?: string;
+  }): Record<string, unknown> {
+    return {
+      source: "mariana",
+      createdBySystem: true,
+      phone: input.phone,
+      cpf: input.registrationData.cpf,
+      patientName: input.patientName,
+      patientId: input.patient.id,
+      appointmentId: input.appointmentId,
+      appointmentType: "primeira_consulta",
+      status: "scheduled"
+    };
+  }
+
+  private async ensureCalendarEventMetadata(input: {
+    calendarEvent: CalendarEventDetails;
+    appointmentId: string;
+    patient: PatientRecord;
+    phone: string;
+    patientName: string;
+    summary: string;
+    selectedSlot: CalendarSlot;
+    registrationData: AgendaParserOutput["registration_data"];
+    parserOutput: AgendaParserOutput;
+    source: string;
+    route?: string;
+  }): Promise<void> {
+    if (!this.calendarService.updateEvent) {
+      return;
+    }
+
+    const expectedDescription = this.buildEventDescription(input);
+    const expectedMetadata = this.buildEventMetadata({
+      patient: input.patient,
+      phone: input.phone,
+      patientName: input.patientName,
+      registrationData: input.registrationData,
+      appointmentId: input.appointmentId
+    });
+    const currentPrivate = input.calendarEvent.extendedProperties ?? {};
+    const metadataIncomplete = REQUIRED_EVENT_PRIVATE_KEYS.some((key) => !currentPrivate[key]);
+    const descriptionIncomplete =
+      !input.calendarEvent.description ||
+      !input.calendarEvent.description.includes("Paciente:") ||
+      !input.calendarEvent.description.includes("Origem: Mariana");
+    const locationIncomplete = input.calendarEvent.location !== CLINIC_LOCATION;
+    const summaryIncomplete = input.calendarEvent.summary !== input.summary;
+
+    if (!metadataIncomplete && !descriptionIncomplete && !locationIncomplete && !summaryIncomplete) {
+      return;
+    }
+
+    await this.calendarService.updateEvent(input.calendarEvent.id, {
+      summary: input.summary,
+      description: expectedDescription,
+      location: CLINIC_LOCATION,
+      metadata: expectedMetadata
+    });
+
+    await this.audit("calendar_event_metadata_updated", input.phone, {
+      phone: input.phone,
+      patientId: input.patient.id,
+      appointmentId: input.appointmentId,
+      oldCalendarEventId: input.calendarEvent.id,
+      start: input.selectedSlot.start,
+      end: input.selectedSlot.end,
+      source: input.source,
+      route: input.route
+    });
   }
 
   private buildCandidateSlots(input: {
