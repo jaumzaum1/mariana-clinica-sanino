@@ -9,6 +9,7 @@ import type {
   PatientRecord,
   PatientsRepository,
   SaveMessageInput,
+  SaveOutboundDraftInput,
   UpsertMessageBatchInput,
   UpsertPatientInput
 } from "../repositories/types.js";
@@ -37,12 +38,41 @@ class FakePatientsRepository implements PatientsRepository {
 
     return patient;
   }
+
+  async findByPhone(phone: string): Promise<PatientRecord | null> {
+    return this.patients.find((patient) => patient.phone === phone) ?? null;
+  }
+
+  async updateMemorySummary(patientId: string, memorySummary: string): Promise<PatientRecord> {
+    const patient = this.patients.find((item) => item.id === patientId);
+    if (!patient) {
+      throw new Error(`Patient not found: ${patientId}`);
+    }
+
+    patient.metadata = {
+      ...patient.metadata,
+      memory_summary: memorySummary
+    };
+    return patient;
+  }
 }
 
 class FakeMessagesRepository implements MessagesRepository {
   messages: MessageRecord[] = [];
 
   async saveInbound(input: SaveMessageInput): Promise<MessageRecord> {
+    const message = {
+      id: `message-${this.messages.length + 1}`,
+      patientId: input.patientId,
+      phone: input.phone,
+      text: input.text
+    };
+
+    this.messages.push(message);
+    return message;
+  }
+
+  async saveOutboundDraft(input: SaveOutboundDraftInput): Promise<MessageRecord> {
     const message = {
       id: `message-${this.messages.length + 1}`,
       patientId: input.patientId,
@@ -99,6 +129,10 @@ class FakeMessageBatchesRepository implements MessageBatchesRepository {
     );
   }
 
+  async findReady(): Promise<MessageBatchRecord[]> {
+    return this.batches.filter((batch) => batch.status === "ready");
+  }
+
   async markReady(id: string): Promise<MessageBatchRecord> {
     const batch = this.batches.find((item) => item.id === id);
     if (!batch) {
@@ -106,6 +140,28 @@ class FakeMessageBatchesRepository implements MessageBatchesRepository {
     }
 
     batch.status = "ready";
+    return batch;
+  }
+
+  async markProcessed(id: string, metadata: Record<string, unknown> = {}): Promise<MessageBatchRecord> {
+    const batch = this.batches.find((item) => item.id === id);
+    if (!batch) {
+      throw new Error(`Batch not found: ${id}`);
+    }
+
+    batch.status = "processed";
+    batch.metadata = { ...batch.metadata, ...metadata };
+    return batch;
+  }
+
+  async markFailed(id: string, metadata: Record<string, unknown> = {}): Promise<MessageBatchRecord> {
+    const batch = this.batches.find((item) => item.id === id);
+    if (!batch) {
+      throw new Error(`Batch not found: ${id}`);
+    }
+
+    batch.status = "failed";
+    batch.metadata = { ...batch.metadata, ...metadata };
     return batch;
   }
 }

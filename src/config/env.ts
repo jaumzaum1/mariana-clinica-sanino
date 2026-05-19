@@ -10,6 +10,11 @@ const EnvSchema = z.object({
   SUPABASE_URL: z.string().url().optional(),
   SUPABASE_SERVICE_ROLE_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL_PARSER: z.string().default("gpt-4.1-mini"),
+  OPENAI_MODEL_MARIANA: z.string().default("gpt-4.1-mini"),
+  SEND_WHATSAPP_ENABLED: z
+    .preprocess((value) => value ?? "false", z.enum(["true", "false"]))
+    .transform((value) => value === "true"),
   ZAPI_INSTANCE_ID: z.string().optional(),
   ZAPI_TOKEN: z.string().optional(),
   ZAPI_CLIENT_TOKEN: z.string().optional(),

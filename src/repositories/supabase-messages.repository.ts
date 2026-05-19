@@ -1,5 +1,10 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
-import type { MessageRecord, MessagesRepository, SaveMessageInput } from "./types.js";
+import type {
+  MessageRecord,
+  MessagesRepository,
+  SaveMessageInput,
+  SaveOutboundDraftInput
+} from "./types.js";
 
 interface MessageRow {
   id: string;
@@ -29,6 +34,33 @@ export class SupabaseMessagesRepository implements MessagesRepository {
           }
         },
         created_at: input.receivedAt?.toISOString()
+      })
+      .select("id, patient_id, phone, text")
+      .single<MessageRow>();
+
+    if (error) {
+      throw error;
+    }
+
+    return {
+      id: data.id,
+      patientId: data.patient_id,
+      phone: data.phone,
+      text: data.text
+    };
+  }
+
+  async saveOutboundDraft(input: SaveOutboundDraftInput): Promise<MessageRecord> {
+    const { data, error } = await this.supabase
+      .from("messages")
+      .insert({
+        patient_id: input.patientId,
+        phone: input.phone,
+        direction: "outbound",
+        text: input.text,
+        raw_payload: {
+          mariana: input.metadata
+        }
       })
       .select("id, patient_id, phone, text")
       .single<MessageRow>();

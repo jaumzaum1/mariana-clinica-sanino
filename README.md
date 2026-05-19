@@ -2,7 +2,7 @@
 
 Fundação técnica do backend da Mariana, secretária médica por WhatsApp da Clínica Sanino.
 
-Esta etapa cria uma base modular, testável e extensível em TypeScript. O webhook da Z-API já persiste entrada no Supabase; OpenAI, envio via Z-API e Google Calendar ainda não são chamados.
+Esta etapa cria uma base modular, testável e extensível em TypeScript. O webhook da Z-API já persiste entrada no Supabase e batches prontos podem gerar respostas da Mariana em modo rascunho. Envio via Z-API e Google Calendar ainda não são chamados.
 
 ## Stack
 
@@ -23,9 +23,17 @@ npm run dev
 npm test
 ```
 
-## Teste local do webhook
+## Teste Local
 
-Com `.env` preenchido com `SUPABASE_URL` e `SUPABASE_SERVICE_ROLE_KEY`, aplique a migration `src/db/migrations/002_message_batches.sql` no Supabase e rode:
+Com `.env` preenchido com `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, `OPENAI_API_KEY`, `OPENAI_MODEL_PARSER`, `OPENAI_MODEL_MARIANA` e `SEND_WHATSAPP_ENABLED=false`, aplique as migrations em `src/db/migrations/` no Supabase.
+
+Suba o backend:
+
+```bash
+npm run dev
+```
+
+Envie uma mensagem de entrada:
 
 ```bash
 curl -X POST http://localhost:3000/webhooks/zapi \
@@ -38,15 +46,30 @@ curl -X POST http://localhost:3000/webhooks/zapi \
   }'
 ```
 
+Após a janela de debounce, processe manualmente os batches prontos:
+
+```bash
+curl -X POST http://localhost:3000/internal/batches/process-ready \
+  -H "Content-Type: application/json"
+```
+
+Para ver o rascunho no Supabase, abra a tabela `messages` e filtre:
+
+- `phone = 5561996531507`
+- `direction = outbound`
+
+O campo `raw_payload->mariana` deve conter `draft=true`, `sent=false` e `send_whatsapp_enabled=false`.
+
 ## Rotas
 
 - `GET /health` retorna `{ "ok": true }`
 - `POST /webhooks/zapi` normaliza telefone, salva paciente/mensagem, atualiza debounce e registra audit logs
 - `POST /internal/commands` permite testar comandos internos determinísticos
+- `POST /internal/batches/process-ready` processa batches prontos em `development`/`test`
 
 ## Integrações
 
-As integrações externas estão modeladas como adapters/services, mas retornam dados mockados nesta fundação:
+As integrações externas estão modeladas como adapters/services. Nesta etapa, OpenAI pode ser chamada para rascunho estruturado; envio via WhatsApp permanece desligado.
 
 - `OpenAIService`
 - `ZapiService`
@@ -57,4 +80,4 @@ As integrações externas estão modeladas como adapters/services, mas retornam 
 
 ## Próxima etapa sugerida
 
-Processar batches prontos com a Mariana, ainda com mocks controlados antes de ligar a OpenAI Responses API.
+Revisar rascunhos no Supabase, estabilizar critérios de pausa/handoff e só depois ligar envio real da Z-API com feature flag explícita.

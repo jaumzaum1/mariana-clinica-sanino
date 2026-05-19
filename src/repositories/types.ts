@@ -15,11 +15,12 @@ export interface MessageRecord {
 export interface MessageBatchRecord {
   id: string;
   phone: string;
-  status: "accumulating" | "ready" | "processed";
+  status: "accumulating" | "ready" | "processed" | "failed";
   accumulatedText: string;
   messageIds: string[];
   lastMessageAt: string;
   processAfter: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface UpsertPatientInput {
@@ -38,6 +39,18 @@ export interface SaveMessageInput {
   receivedAt?: Date;
 }
 
+export interface SaveOutboundDraftInput {
+  patientId?: string;
+  phone: string;
+  text: string;
+  metadata: {
+    draft: true;
+    sent: false;
+    send_whatsapp_enabled: false;
+    [key: string]: unknown;
+  };
+}
+
 export interface CreateAuditLogInput {
   event: string;
   phone?: string;
@@ -54,10 +67,13 @@ export interface UpsertMessageBatchInput {
 
 export interface PatientsRepository {
   upsert(input: UpsertPatientInput): Promise<PatientRecord>;
+  findByPhone(phone: string): Promise<PatientRecord | null>;
+  updateMemorySummary(patientId: string, memorySummary: string): Promise<PatientRecord>;
 }
 
 export interface MessagesRepository {
   saveInbound(input: SaveMessageInput): Promise<MessageRecord>;
+  saveOutboundDraft(input: SaveOutboundDraftInput): Promise<MessageRecord>;
 }
 
 export interface AuditLogsRepository {
@@ -67,5 +83,8 @@ export interface AuditLogsRepository {
 export interface MessageBatchesRepository {
   upsertAccumulating(input: UpsertMessageBatchInput): Promise<MessageBatchRecord>;
   findDue(now: Date, limit?: number): Promise<MessageBatchRecord[]>;
+  findReady(limit?: number): Promise<MessageBatchRecord[]>;
   markReady(id: string): Promise<MessageBatchRecord>;
+  markProcessed(id: string, metadata?: Record<string, unknown>): Promise<MessageBatchRecord>;
+  markFailed(id: string, metadata?: Record<string, unknown>): Promise<MessageBatchRecord>;
 }

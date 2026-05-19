@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from "fastify";
+import type { ConversationProcessorService } from "./conversation-processor.service.js";
 import type { MessageDebounceService } from "./message-debounce.service.js";
 
 export class MessageBatchWorkerService {
@@ -6,6 +7,7 @@ export class MessageBatchWorkerService {
 
   constructor(
     private readonly debounceService: MessageDebounceService,
+    private readonly conversationProcessorService: ConversationProcessorService,
     private readonly intervalMs: number,
     private readonly logger?: FastifyBaseLogger
   ) {}
@@ -33,7 +35,12 @@ export class MessageBatchWorkerService {
     try {
       const readyBatches = await this.debounceService.processDueBatches();
       if (readyBatches.length > 0) {
-        this.logger?.info({ count: readyBatches.length }, "message_batches.processed");
+        this.logger?.info({ count: readyBatches.length }, "message_batches.ready");
+      }
+
+      const result = await this.conversationProcessorService.processReadyBatches();
+      if (result.processed.length > 0) {
+        this.logger?.info({ count: result.processed.length }, "message_batches.processed");
       }
     } catch (error) {
       this.logger?.error({ error }, "message_batches.worker_error");
