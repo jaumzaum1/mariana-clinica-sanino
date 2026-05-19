@@ -7,3 +7,6 @@ coverage/
 !.env.example
 npm-debug.log*
 .DS_Store
+secrets/
+*.credentials.json
+*service-account*.json
