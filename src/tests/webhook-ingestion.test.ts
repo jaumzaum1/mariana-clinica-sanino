@@ -6,6 +6,7 @@ import type {
   MessageBatchesRepository,
   MessageRecord,
   MessagesRepository,
+  OutboundDraftMessageRecord,
   PatientRecord,
   PatientsRepository,
   SaveMessageInput,
@@ -82,6 +83,26 @@ class FakeMessagesRepository implements MessagesRepository {
 
     this.messages.push(message);
     return message;
+  }
+
+  async findPendingOutboundDrafts(): Promise<OutboundDraftMessageRecord[]> {
+    return [];
+  }
+
+  async markOutboundProcessing(): Promise<OutboundDraftMessageRecord | null> {
+    return null;
+  }
+
+  async markOutboundSkipped(messageId: string): Promise<MessageRecord> {
+    return this.messages.find((message) => message.id === messageId) ?? this.messages[0];
+  }
+
+  async markOutboundSent(messageId: string): Promise<MessageRecord> {
+    return this.messages.find((message) => message.id === messageId) ?? this.messages[0];
+  }
+
+  async markOutboundSendFailed(messageId: string): Promise<MessageRecord> {
+    return this.messages.find((message) => message.id === messageId) ?? this.messages[0];
   }
 }
 

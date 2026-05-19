@@ -10,19 +10,23 @@ import { SupabasePatientsRepository } from "../repositories/supabase-patients.re
 import { batchesRoutes } from "../routes/batches.routes.js";
 import { commandsRoutes } from "../routes/commands.routes.js";
 import { healthRoutes } from "../routes/health.routes.js";
+import { outboundRoutes } from "../routes/outbound.routes.js";
 import { whatsappRoutes } from "../routes/whatsapp.routes.js";
 import { AuditLogService } from "../services/audit-log.service.js";
 import { ConversationProcessorService } from "../services/conversation-processor.service.js";
 import { MessageBatchWorkerService } from "../services/message-batch-worker.service.js";
 import { MessageDebounceService } from "../services/message-debounce.service.js";
 import { OpenAIService } from "../services/openai.service.js";
+import { OutboundMessageSenderService } from "../services/outbound-message-sender.service.js";
 import { PatientMemoryService } from "../services/patient-memory.service.js";
 import { WebhookIngestionService } from "../services/webhook-ingestion.service.js";
+import { ZapiService } from "../services/zapi.service.js";
 import { ZapiWebhookNormalizerService } from "../services/zapi-webhook-normalizer.service.js";
 
 export interface AppDependencies {
   webhookIngestionService?: WebhookIngestionService;
   conversationProcessorService?: ConversationProcessorService;
+  outboundMessageSenderService?: OutboundMessageSenderService;
   messageBatchWorkerService?: MessageBatchWorkerService;
 }
 
@@ -65,6 +69,16 @@ function createDefaultDependencies(app: FastifyInstance): AppDependencies {
     auditLogService,
     { sendWhatsappEnabled: env.SEND_WHATSAPP_ENABLED }
   );
+  const outboundMessageSenderService = new OutboundMessageSenderService(
+    messagesRepository,
+    new ZapiService(),
+    auditLogService,
+    {
+      sendWhatsappEnabled: env.SEND_WHATSAPP_ENABLED,
+      whatsappMode: env.WHATSAPP_MODE,
+      whatsappTestPhone: env.WHATSAPP_TEST_PHONE
+    }
+  );
 
   return {
     webhookIngestionService: new WebhookIngestionService(
@@ -75,6 +89,7 @@ function createDefaultDependencies(app: FastifyInstance): AppDependencies {
       auditLogService
     ),
     conversationProcessorService,
+    outboundMessageSenderService,
     messageBatchWorkerService: new MessageBatchWorkerService(
       messageDebounceService,
       conversationProcessorService,
@@ -103,6 +118,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   app.register(commandsRoutes);
   app.register(batchesRoutes, {
     conversationProcessorService: dependencies.conversationProcessorService
+  });
+  app.register(outboundRoutes, {
+    outboundMessageSenderService: dependencies.outboundMessageSenderService
   });
 
   if (options.startWorker && dependencies.messageBatchWorkerService) {

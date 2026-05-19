@@ -15,6 +15,12 @@ const EnvSchema = z.object({
   SEND_WHATSAPP_ENABLED: z
     .preprocess((value) => value ?? "false", z.enum(["true", "false"]))
     .transform((value) => value === "true"),
+  WHATSAPP_MODE: z.enum(["test", "production"]).default("test"),
+  WHATSAPP_TEST_PHONE: z.string().default("556196531507"),
+  ALLOW_INTERNAL_ROUTES: z
+    .preprocess((value) => value ?? "false", z.enum(["true", "false"]))
+    .transform((value) => value === "true"),
+  ZAPI_BASE_URL: z.string().url().optional(),
   ZAPI_INSTANCE_ID: z.string().optional(),
   ZAPI_TOKEN: z.string().optional(),
   ZAPI_CLIENT_TOKEN: z.string().optional(),

@@ -12,6 +12,21 @@ export interface MessageRecord {
   text: string;
 }
 
+export type OutboundSendStatus =
+  | "draft"
+  | "processing"
+  | "skipped"
+  | "sent"
+  | "send_failed";
+
+export interface OutboundDraftMessageRecord extends MessageRecord {
+  rawPayload: Record<string, unknown>;
+  sendStatus?: OutboundSendStatus | null;
+  sentAt?: string | null;
+  providerMessageId?: string | null;
+  sendError?: string | null;
+}
+
 export interface MessageBatchRecord {
   id: string;
   phone: string;
@@ -74,6 +89,19 @@ export interface PatientsRepository {
 export interface MessagesRepository {
   saveInbound(input: SaveMessageInput): Promise<MessageRecord>;
   saveOutboundDraft(input: SaveOutboundDraftInput): Promise<MessageRecord>;
+  findPendingOutboundDrafts(limit?: number): Promise<OutboundDraftMessageRecord[]>;
+  markOutboundProcessing(messageId: string): Promise<OutboundDraftMessageRecord | null>;
+  markOutboundSkipped(messageId: string, metadata: Record<string, unknown>): Promise<MessageRecord>;
+  markOutboundSent(
+    messageId: string,
+    providerMessageId: string | undefined,
+    metadata: Record<string, unknown>
+  ): Promise<MessageRecord>;
+  markOutboundSendFailed(
+    messageId: string,
+    error: string,
+    metadata: Record<string, unknown>
+  ): Promise<MessageRecord>;
 }
 
 export interface AuditLogsRepository {

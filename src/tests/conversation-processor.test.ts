@@ -8,6 +8,7 @@ import type {
   MessageBatchesRepository,
   MessageRecord,
   MessagesRepository,
+  OutboundDraftMessageRecord,
   PatientRecord,
   PatientsRepository,
   SaveMessageInput,
@@ -124,6 +125,45 @@ class FakeMessagesRepository implements MessagesRepository {
     this.outboundDrafts.push(message);
     return message;
   }
+
+  async findPendingOutboundDrafts(): Promise<OutboundDraftMessageRecord[]> {
+    return this.outboundDrafts.map((message) => ({
+      ...message,
+      rawPayload: { mariana: message.metadata },
+      sendStatus: message.metadata.sent ? "sent" : "draft",
+      sentAt: null,
+      providerMessageId: null,
+      sendError: null
+    }));
+  }
+
+  async markOutboundProcessing(messageId: string): Promise<OutboundDraftMessageRecord | null> {
+    const message = this.outboundDrafts.find((item) => item.id === messageId);
+    if (!message || message.metadata.sent) {
+      return null;
+    }
+
+    return {
+      ...message,
+      rawPayload: { mariana: message.metadata },
+      sendStatus: "processing",
+      sentAt: null,
+      providerMessageId: null,
+      sendError: null
+    };
+  }
+
+  async markOutboundSkipped(messageId: string): Promise<MessageRecord> {
+    return this.outboundDrafts.find((message) => message.id === messageId) ?? this.outboundDrafts[0];
+  }
+
+  async markOutboundSent(messageId: string): Promise<MessageRecord> {
+    return this.outboundDrafts.find((message) => message.id === messageId) ?? this.outboundDrafts[0];
+  }
+
+  async markOutboundSendFailed(messageId: string): Promise<MessageRecord> {
+    return this.outboundDrafts.find((message) => message.id === messageId) ?? this.outboundDrafts[0];
+  }
 }
 
 class FakeAuditLogsRepository implements AuditLogsRepository {
@@ -220,7 +260,7 @@ function createProcessorTestServices() {
     { sendWhatsappEnabled: false },
     { sendMessage: async (input) => {
       zapiCalls.push(input);
-      return { id: "zapi-1", mocked: true };
+      return { provider: "zapi", messageId: "zapi-1" };
     } }
   );
 
