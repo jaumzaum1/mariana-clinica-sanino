@@ -25,6 +25,7 @@ const EnvSchema = z.object({
   ZAPI_TOKEN: z.string().optional(),
   ZAPI_CLIENT_TOKEN: z.string().optional(),
   GOOGLE_CALENDAR_ID: z.string().optional(),
+  GOOGLE_SERVICE_ACCOUNT_KEY_FILE: z.string().optional(),
   GOOGLE_CLIENT_EMAIL: z.string().email().optional(),
   GOOGLE_PRIVATE_KEY: z.string().optional()
 });

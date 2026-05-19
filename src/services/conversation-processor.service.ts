@@ -8,6 +8,7 @@ import type {
 import type { AgendaParserAgent } from "../agents/agenda-parser.agent.js";
 import type { MarianaAgent } from "../agents/mariana.agent.js";
 import type { AuditLogService } from "./audit-log.service.js";
+import type { AvailabilityResult, SchedulingService } from "./scheduling.service.js";
 import type { ZapiService } from "./zapi.service.js";
 
 export interface ConversationProcessorOptions {
@@ -36,7 +37,8 @@ export class ConversationProcessorService {
     private readonly marianaAgent: Pick<MarianaAgent, "respond">,
     private readonly auditLogService: AuditLogService,
     private readonly options: ConversationProcessorOptions,
-    private readonly zapiService?: Pick<ZapiService, "sendMessage">
+    private readonly zapiService?: Pick<ZapiService, "sendMessage">,
+    private readonly schedulingService?: SchedulingService
   ) {}
 
   async processReadyBatches(limit = 25): Promise<ProcessReadyBatchesResult> {
@@ -106,6 +108,42 @@ export class ConversationProcessorService {
     }
 
     const agenda = await this.agendaParserAgent.parse(accumulatedText);
+    let availability: AvailabilityResult | undefined;
+    let appointment:
+      | Awaited<ReturnType<SchedulingService["createAppointmentIfReady"]>>
+      | undefined;
+
+    if (this.shouldUseScheduling(agenda) && this.schedulingService) {
+      availability = await this.schedulingService.getAvailableSlots({
+        preferences: {
+          dates: agenda.appointment_preferences.dates,
+          periods: agenda.appointment_preferences.periods,
+          rawText: accumulatedText
+        },
+        durationMinutes: 90
+      });
+
+      appointment = await this.schedulingService.createAppointmentIfReady({
+        patient,
+        registrationData: agenda.registration_data,
+        selectedSlot: null,
+        parserOutput: agenda
+      });
+
+      await this.auditLogService.create({
+        event: "scheduling_evaluated",
+        phone,
+        metadata: {
+          batchId,
+          availableSlots: availability.slots,
+          appointmentCreated: appointment.created,
+          eventId: appointment.eventId,
+          missingFields: appointment.missingFields,
+          blockedReason: availability.blockedReason
+        }
+      });
+    }
+
     await this.auditLogService.create({
       event: "agenda_parser_completed",
       phone,
@@ -125,7 +163,14 @@ export class ConversationProcessorService {
       patientMemory:
         typeof patient.metadata?.memory_summary === "string"
           ? patient.metadata.memory_summary
-          : undefined
+          : undefined,
+      schedulingContext: {
+        AVAILABLE_SLOTS: availability?.slots ?? [],
+        EVENT_CREATED: appointment?.created ?? false,
+        EVENT_ID: appointment?.eventId,
+        MISSING_REGISTRATION_FIELDS: appointment?.missingFields ?? [],
+        BLOCKED_REASON: availability?.blockedReason ?? appointment?.reason
+      }
     });
 
     const outbound = await this.saveDraft(patient.id, phone, batchId, agenda, mariana);
@@ -137,6 +182,10 @@ export class ConversationProcessorService {
     await this.messageBatchesRepository.markProcessed(batchId, {
       agenda_parser_output: agenda,
       mariana_response_output: mariana,
+        scheduling: {
+          available_slots: availability?.slots ?? [],
+          appointment
+        },
       outbound_message_id: outbound.id,
       duration_ms: Date.now() - startedAt
     });
@@ -210,5 +259,9 @@ export class ConversationProcessorService {
     });
 
     return outbound;
+  }
+
+  private shouldUseScheduling(agenda: AgendaParserOutput): boolean {
+    return ["schedule", "reschedule"].includes(agenda.intent) || agenda.scheduling_action !== "none";
   }
 }

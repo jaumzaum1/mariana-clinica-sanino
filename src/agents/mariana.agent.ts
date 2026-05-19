@@ -12,6 +12,7 @@ export interface MarianaAgentInput {
   message: string;
   agenda: AgendaParserOutput;
   patientMemory?: string;
+  schedulingContext?: unknown;
 }
 
 export class MarianaAgent {
@@ -45,7 +46,8 @@ export class MarianaAgent {
           phone: input.phone,
           message: input.message,
           agenda: input.agenda,
-          memory: input.patientMemory ?? memory.summary
+          memory: input.patientMemory ?? memory.summary,
+          scheduling: input.schedulingContext
         }),
         model: this.model,
         schemaName: "MarianaResponseOutput",

@@ -12,6 +12,7 @@ export class SupabasePatientsRepository implements PatientsRepository {
   constructor(private readonly supabase: SupabaseClient) {}
 
   async upsert(input: UpsertPatientInput): Promise<PatientRecord> {
+    const existing = await this.findByPhone(input.phone);
     const { data, error } = await this.supabase
       .from("patients")
       .upsert(
@@ -19,7 +20,9 @@ export class SupabasePatientsRepository implements PatientsRepository {
           phone: input.phone,
           name: input.name,
           metadata: {
-            whatsapp_variants: input.phoneVariants
+            ...(existing?.metadata ?? {}),
+            whatsapp_variants: input.phoneVariants,
+            ...(input.metadata ?? {})
           },
           updated_at: new Date().toISOString()
         },

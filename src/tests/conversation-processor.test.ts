@@ -21,6 +21,8 @@ import { AuditLogService } from "../services/audit-log.service.js";
 import { ConversationProcessorService } from "../services/conversation-processor.service.js";
 import { MessageBatchWorkerService } from "../services/message-batch-worker.service.js";
 import { MessageDebounceService } from "../services/message-debounce.service.js";
+import type { MarianaAgentInput } from "../agents/mariana.agent.js";
+import type { CalendarSlot } from "../services/calendar.service.js";
 
 const agendaOutput: AgendaParserOutput = {
   intent: "schedule",
@@ -397,5 +399,89 @@ describe("ConversationProcessorService", () => {
     });
 
     await app.close();
+  });
+
+  it("passes AVAILABLE_SLOTS to Mariana when scheduling is relevant", async () => {
+    const services = createProcessorTestServices();
+    const availableSlot: CalendarSlot = {
+      start: new Date(2026, 4, 19, 15, 30).toISOString(),
+      end: new Date(2026, 4, 19, 17, 0).toISOString()
+    };
+    let capturedInput: MarianaAgentInput | undefined;
+    const processor = new ConversationProcessorService(
+      services.messageBatchesRepository,
+      services.patientsRepository,
+      services.messagesRepository,
+      { parse: async () => agendaOutput },
+      {
+        respond: async (input) => {
+          capturedInput = input;
+          return marianaOutput;
+        }
+      },
+      new AuditLogService(services.auditLogsRepository),
+      { sendWhatsappEnabled: false },
+      undefined,
+      {
+        getAvailableSlots: async () => ({ slots: [availableSlot], alternatives: [availableSlot] }),
+        createAppointmentIfReady: async () => ({ created: false, missingFields: ["cpf"] })
+      } as never
+    );
+
+    await processor.processReadyBatches();
+
+    expect(capturedInput?.schedulingContext).toMatchObject({
+      AVAILABLE_SLOTS: [availableSlot],
+      EVENT_CREATED: false,
+      MISSING_REGISTRATION_FIELDS: ["cpf"]
+    });
+  });
+
+  it("marks scheduling appointment created in batch metadata", async () => {
+    const services = createProcessorTestServices();
+    const slot = {
+      start: new Date(2026, 4, 19, 15, 30).toISOString(),
+      end: new Date(2026, 4, 19, 17, 0).toISOString()
+    };
+    const processor = new ConversationProcessorService(
+      services.messageBatchesRepository,
+      services.patientsRepository,
+      services.messagesRepository,
+      {
+        parse: async () => ({
+          ...agendaOutput,
+          appointment_preferences: {
+            ...agendaOutput.appointment_preferences,
+            dates: [slot.start]
+          }
+        })
+      },
+      { respond: async () => marianaOutput },
+      new AuditLogService(services.auditLogsRepository),
+      { sendWhatsappEnabled: false },
+      undefined,
+      {
+        getAvailableSlots: async () => ({ slots: [slot], alternatives: [slot] }),
+        createAppointmentIfReady: async () => ({
+          created: true,
+          eventId: "event-1",
+          appointmentId: "appointment-1",
+          missingFields: [],
+          selectedSlot: slot
+        })
+      } as never
+    );
+
+    await processor.processReadyBatches();
+
+    expect(services.messageBatchesRepository.batches[0].metadata).toMatchObject({
+      scheduling: {
+        appointment: {
+          created: true,
+          eventId: "event-1",
+          appointmentId: "appointment-1"
+        }
+      }
+    });
   });
 });

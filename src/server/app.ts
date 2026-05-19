@@ -4,6 +4,7 @@ import { createSupabaseClient } from "../db/supabase.js";
 import { AgendaParserAgent } from "../agents/agenda-parser.agent.js";
 import { MarianaAgent } from "../agents/mariana.agent.js";
 import { SupabaseAuditLogsRepository } from "../repositories/supabase-audit-logs.repository.js";
+import { SupabaseAppointmentsRepository } from "../repositories/supabase-appointments.repository.js";
 import { SupabaseMessageBatchesRepository } from "../repositories/supabase-message-batches.repository.js";
 import { SupabaseMessagesRepository } from "../repositories/supabase-messages.repository.js";
 import { SupabasePatientsRepository } from "../repositories/supabase-patients.repository.js";
@@ -11,14 +12,17 @@ import { batchesRoutes } from "../routes/batches.routes.js";
 import { commandsRoutes } from "../routes/commands.routes.js";
 import { healthRoutes } from "../routes/health.routes.js";
 import { outboundRoutes } from "../routes/outbound.routes.js";
+import { schedulingRoutes } from "../routes/scheduling.routes.js";
 import { whatsappRoutes } from "../routes/whatsapp.routes.js";
 import { AuditLogService } from "../services/audit-log.service.js";
+import { CalendarService } from "../services/calendar.service.js";
 import { ConversationProcessorService } from "../services/conversation-processor.service.js";
 import { MessageBatchWorkerService } from "../services/message-batch-worker.service.js";
 import { MessageDebounceService } from "../services/message-debounce.service.js";
 import { OpenAIService } from "../services/openai.service.js";
 import { OutboundMessageSenderService } from "../services/outbound-message-sender.service.js";
 import { PatientMemoryService } from "../services/patient-memory.service.js";
+import { SchedulingService } from "../services/scheduling.service.js";
 import { WebhookIngestionService } from "../services/webhook-ingestion.service.js";
 import { ZapiService } from "../services/zapi.service.js";
 import { ZapiWebhookNormalizerService } from "../services/zapi-webhook-normalizer.service.js";
@@ -27,6 +31,8 @@ export interface AppDependencies {
   webhookIngestionService?: WebhookIngestionService;
   conversationProcessorService?: ConversationProcessorService;
   outboundMessageSenderService?: OutboundMessageSenderService;
+  schedulingService?: SchedulingService;
+  auditLogService?: AuditLogService;
   messageBatchWorkerService?: MessageBatchWorkerService;
 }
 
@@ -46,6 +52,7 @@ function createDefaultDependencies(app: FastifyInstance): AppDependencies {
   const auditLogsRepository = new SupabaseAuditLogsRepository(supabase);
   const patientsRepository = new SupabasePatientsRepository(supabase);
   const messagesRepository = new SupabaseMessagesRepository(supabase);
+  const appointmentsRepository = new SupabaseAppointmentsRepository(supabase);
   const messageBatchesRepository = new SupabaseMessageBatchesRepository(supabase);
   const auditLogService = new AuditLogService(auditLogsRepository, app.log);
   const messageDebounceService = new MessageDebounceService(
@@ -55,6 +62,12 @@ function createDefaultDependencies(app: FastifyInstance): AppDependencies {
   );
   const openAIService = new OpenAIService();
   const agendaParserAgent = new AgendaParserAgent(openAIService, env.OPENAI_MODEL_PARSER);
+  const schedulingService = new SchedulingService(
+    new CalendarService(),
+    appointmentsRepository,
+    patientsRepository,
+    auditLogService
+  );
   const marianaAgent = new MarianaAgent(
     openAIService,
     new PatientMemoryService(),
@@ -67,7 +80,9 @@ function createDefaultDependencies(app: FastifyInstance): AppDependencies {
     agendaParserAgent,
     marianaAgent,
     auditLogService,
-    { sendWhatsappEnabled: env.SEND_WHATSAPP_ENABLED }
+    { sendWhatsappEnabled: env.SEND_WHATSAPP_ENABLED },
+    undefined,
+    schedulingService
   );
   const outboundMessageSenderService = new OutboundMessageSenderService(
     messagesRepository,
@@ -90,6 +105,8 @@ function createDefaultDependencies(app: FastifyInstance): AppDependencies {
     ),
     conversationProcessorService,
     outboundMessageSenderService,
+    schedulingService,
+    auditLogService,
     messageBatchWorkerService: new MessageBatchWorkerService(
       messageDebounceService,
       conversationProcessorService,
@@ -121,6 +138,10 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   });
   app.register(outboundRoutes, {
     outboundMessageSenderService: dependencies.outboundMessageSenderService
+  });
+  app.register(schedulingRoutes, {
+    schedulingService: dependencies.schedulingService,
+    auditLogService: dependencies.auditLogService
   });
 
   if (options.startWorker && dependencies.messageBatchWorkerService) {

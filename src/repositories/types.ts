@@ -47,6 +47,7 @@ export interface UpsertPatientInput {
   phone: string;
   name?: string;
   phoneVariants: string[];
+  metadata?: Record<string, unknown>;
 }
 
 export interface SaveMessageInput {
@@ -76,6 +77,30 @@ export interface CreateAuditLogInput {
   event: string;
   phone?: string;
   metadata?: unknown;
+}
+
+export interface AppointmentRecord {
+  id: string;
+  patientId: string;
+  phone: string;
+  calendarEventId?: string | null;
+  status: string;
+  startsAt: string;
+  endsAt: string;
+  metadata?: Record<string, unknown>;
+}
+
+export interface SaveAppointmentInput {
+  patientId: string;
+  phone: string;
+  calendarEventId: string;
+  status: string;
+  startsAt: string;
+  endsAt: string;
+  appointmentType: string;
+  source: string;
+  notes?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface UpsertMessageBatchInput {
@@ -113,6 +138,15 @@ export interface MessagesRepository {
 
 export interface AuditLogsRepository {
   create(input: CreateAuditLogInput): Promise<void>;
+}
+
+export interface AppointmentsRepository {
+  create(input: SaveAppointmentInput): Promise<AppointmentRecord>;
+  findScheduledByPatientSlot(input: {
+    patientId: string;
+    startsAt: string;
+    endsAt: string;
+  }): Promise<AppointmentRecord | null>;
 }
 
 export interface MessageBatchesRepository {
