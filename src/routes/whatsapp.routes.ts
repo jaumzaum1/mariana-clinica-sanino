@@ -1,29 +1,39 @@
 import type { FastifyInstance } from "fastify";
-import { ZapiWebhookSchema } from "../schemas/webhook.schema.js";
-import { LoggingService } from "../services/logging.service.js";
+import type { WebhookIngestionService } from "../services/webhook-ingestion.service.js";
 
-export async function whatsappRoutes(app: FastifyInstance): Promise<void> {
-  const loggingService = new LoggingService(app.log);
+export interface WhatsappRoutesOptions {
+  webhookIngestionService?: WebhookIngestionService;
+}
 
+export async function whatsappRoutes(
+  app: FastifyInstance,
+  options: WhatsappRoutesOptions = {}
+): Promise<void> {
   app.post("/webhooks/zapi", async (request, reply) => {
-    const parsed = ZapiWebhookSchema.safeParse(request.body);
-
-    if (!parsed.success) {
-      return reply.status(400).send({
+    if (!options.webhookIngestionService) {
+      app.log.error("webhook_ingestion.unavailable");
+      return reply.status(503).send({
         ok: false,
-        error: "Invalid Z-API webhook payload"
+        error: "Webhook ingestion service is not configured"
       });
     }
 
-    loggingService.info({
-      event: "zapi.webhook.received",
-      phone: parsed.data.phone,
-      metadata: parsed.data
-    });
+    try {
+      const result = await options.webhookIngestionService.ingestZapiWebhook(request.body);
 
-    return {
-      ok: true,
-      received: true
-    };
+      return {
+        ok: true,
+        received: true,
+        phone: result.phone,
+        messageId: result.messageId,
+        batchId: result.batchId
+      };
+    } catch (error) {
+      app.log.warn({ error }, "zapi.webhook.invalid_or_failed");
+      return reply.status(400).send({
+        ok: false,
+        error: error instanceof Error ? error.message : "Invalid Z-API webhook payload"
+      });
+    }
   });
 }

@@ -1,7 +1,7 @@
 import { env } from "../config/env.js";
 import { buildApp } from "./app.js";
 
-const app = buildApp();
+const app = buildApp({ startWorker: true });
 
 try {
   await app.listen({
