@@ -189,11 +189,13 @@ export class ConversationProcessorService {
       metadata: {
         draft: true,
         sent: false,
-        send_whatsapp_enabled: false,
+        send_whatsapp_enabled: this.options.sendWhatsappEnabled,
+        send_status: this.options.sendWhatsappEnabled ? "pending" : "draft",
         batch_id: batchId,
         agenda_parser_output: agenda,
         mariana_response_output: mariana
-      }
+      },
+      sendStatus: this.options.sendWhatsappEnabled ? "pending" : "draft"
     });
 
     await this.auditLogService.create({

@@ -21,10 +21,11 @@ class FakeMessagesRepository implements MessagesRepository {
       phone: "5561999999999",
       text: "Mensagem de teste",
       rawPayload: { mariana: { draft: true, sent: false } },
-      sendStatus: "draft",
+      sendStatus: "pending",
       sentAt: null,
       providerMessageId: null,
-      sendError: null
+      sendError: null,
+      sendAttempts: 0
     }
   ];
 
@@ -44,32 +45,51 @@ class FakeMessagesRepository implements MessagesRepository {
       phone: input.phone,
       text: input.text,
       rawPayload: { mariana: input.metadata },
-      sendStatus: "draft",
+      sendStatus: input.sendStatus ?? "draft",
       sentAt: null,
       providerMessageId: null,
-      sendError: null
+      sendError: null,
+      sendAttempts: 0
     };
     this.messages.push(message);
     return message;
   }
 
-  async findPendingOutboundDrafts(): Promise<OutboundDraftMessageRecord[]> {
+  async findPendingOutboundForSend(limit = 5): Promise<OutboundDraftMessageRecord[]> {
     return this.messages.filter(
       (message) =>
         !message.sentAt &&
-        message.sendStatus !== "sent" &&
-        message.sendStatus !== "processing"
-    );
+        message.sendStatus === "pending"
+    ).slice(0, limit);
   }
 
-  async markOutboundProcessing(messageId: string): Promise<OutboundDraftMessageRecord | null> {
+  async markOutboundSending(
+    messageId: string,
+    lockId: string
+  ): Promise<OutboundDraftMessageRecord | null> {
     const message = this.messages.find((item) => item.id === messageId);
-    if (!message || message.sentAt || message.sendStatus === "sent" || message.sendStatus === "processing") {
+    if (!message || message.sentAt || message.sendStatus !== "pending") {
       return null;
     }
 
-    message.sendStatus = "processing";
+    message.sendStatus = "sending";
+    message.lockId = lockId;
+    message.lockedAt = new Date().toISOString();
+    message.sendAttempts = (message.sendAttempts ?? 0) + 1;
     return message;
+  }
+
+  async queueLatestOutboundDraft(phone: string): Promise<OutboundDraftMessageRecord | null> {
+    const draft = [...this.messages]
+      .reverse()
+      .find((message) => message.phone === phone && message.sendStatus === "draft" && !message.sentAt);
+
+    if (!draft) {
+      return null;
+    }
+
+    draft.sendStatus = "pending";
+    return draft;
   }
 
   async markOutboundSkipped(
@@ -78,6 +98,8 @@ class FakeMessagesRepository implements MessagesRepository {
   ): Promise<MessageRecord> {
     const message = this.getMessage(messageId);
     message.sendStatus = "skipped";
+    message.lockId = null;
+    message.lockedAt = null;
     message.rawPayload = { mariana: { ...this.getMarianaMetadata(message), ...metadata, sent: false } };
     return message;
   }
@@ -91,6 +113,8 @@ class FakeMessagesRepository implements MessagesRepository {
     message.sendStatus = "sent";
     message.sentAt = new Date().toISOString();
     message.providerMessageId = providerMessageId;
+    message.lockId = null;
+    message.lockedAt = null;
     message.rawPayload = { mariana: { ...this.getMarianaMetadata(message), ...metadata, sent: true } };
     return message;
   }
@@ -103,6 +127,8 @@ class FakeMessagesRepository implements MessagesRepository {
     const message = this.getMessage(messageId);
     message.sendStatus = "send_failed";
     message.sendError = error;
+    message.lockId = null;
+    message.lockedAt = null;
     message.rawPayload = {
       mariana: { ...this.getMarianaMetadata(message), ...metadata, sent: false, send_error: error }
     };
@@ -137,8 +163,12 @@ function createSender(options: {
   whatsappMode: "test" | "production";
   zapiThrows?: boolean;
   alreadySent?: boolean;
+  initialStatus?: OutboundDraftMessageRecord["sendStatus"] | null;
 }) {
   const messagesRepository = new FakeMessagesRepository();
+  if (options.initialStatus !== undefined) {
+    messagesRepository.messages[0].sendStatus = options.initialStatus;
+  }
   if (options.alreadySent) {
     messagesRepository.messages[0].sendStatus = "sent";
     messagesRepository.messages[0].sentAt = new Date().toISOString();
@@ -181,12 +211,25 @@ describe("OutboundMessageSenderService", () => {
 
     const summary = await services.sender.sendPending();
 
-    expect(summary).toMatchObject({ processed: 1, skipped: 1, sent: 0, failed: 0 });
+    expect(summary).toMatchObject({ processed: 0, skipped: 0, sent: 0, failed: 0 });
     expect(services.zapiCalls).toHaveLength(0);
-    expect(services.messagesRepository.messages[0].sendStatus).toBe("skipped");
+    expect(services.messagesRepository.messages[0].sendStatus).toBe("pending");
     expect(services.auditLogsRepository.logs.map((log) => log.event)).toContain(
       "outbound_send_skipped"
     );
+  });
+
+  it("findPendingOutboundForSend does not return draft or null status", async () => {
+    const repository = new FakeMessagesRepository();
+    repository.messages = [
+      { ...repository.messages[0], id: "draft", sendStatus: "draft" },
+      { ...repository.messages[0], id: "null", sendStatus: null },
+      { ...repository.messages[0], id: "pending", sendStatus: "pending" }
+    ];
+
+    const pending = await repository.findPendingOutboundForSend();
+
+    expect(pending.map((message) => message.id)).toEqual(["pending"]);
   });
 
   it("uses WHATSAPP_TEST_PHONE in test mode", async () => {
@@ -244,6 +287,56 @@ describe("OutboundMessageSenderService", () => {
     expect(services.auditLogsRepository.logs.map((log) => log.event)).toContain(
       "outbound_send_failed"
     );
+
+    const secondSummary = await services.sender.sendPending();
+
+    expect(secondSummary.processed).toBe(0);
+    expect(services.zapiCalls).toHaveLength(1);
+  });
+
+  it("queue-latest-draft marks only the latest draft for one phone as pending", async () => {
+    const services = createSender({
+      sendWhatsappEnabled: true,
+      whatsappMode: "test",
+      initialStatus: "draft"
+    });
+    services.messagesRepository.messages.push(
+      {
+        ...services.messagesRepository.messages[0],
+        id: "outbound-2",
+        sendStatus: "draft",
+        text: "Mais recente"
+      },
+      {
+        ...services.messagesRepository.messages[0],
+        id: "other-phone",
+        phone: "5561888888888",
+        sendStatus: "draft"
+      }
+    );
+
+    const queued = await services.sender.queueLatestDraft("5561999999999");
+
+    expect(queued?.id).toBe("outbound-2");
+    expect(services.messagesRepository.messages.map((message) => [message.id, message.sendStatus])).toEqual([
+      ["outbound-1", "draft"],
+      ["outbound-2", "pending"],
+      ["other-phone", "draft"]
+    ]);
+  });
+
+  it("send-pending with limit 1 sends at most one pending message", async () => {
+    const services = createSender({ sendWhatsappEnabled: true, whatsappMode: "test" });
+    services.messagesRepository.messages.push({
+      ...services.messagesRepository.messages[0],
+      id: "outbound-2",
+      sendStatus: "pending"
+    });
+
+    const summary = await services.sender.sendPending(1);
+
+    expect(summary.processed).toBe(1);
+    expect(services.zapiCalls).toHaveLength(1);
   });
 
   it("POST /internal/outbound/send-pending works with mocks", async () => {
@@ -265,10 +358,38 @@ describe("OutboundMessageSenderService", () => {
       ok: true,
       mode: "test",
       sendEnabled: false,
-      processed: 1,
+      processed: 0,
       sent: 0,
-      skipped: 1,
+      skipped: 0,
       failed: 0
+    });
+
+    await app.close();
+  });
+
+  it("POST /internal/outbound/queue-latest-draft queues one draft", async () => {
+    const services = createSender({
+      sendWhatsappEnabled: true,
+      whatsappMode: "test",
+      initialStatus: "draft"
+    });
+    const app = buildApp({
+      dependencies: {
+        outboundMessageSenderService: services.sender
+      }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/internal/outbound/queue-latest-draft",
+      payload: { phone: "5561999999999" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      ok: true,
+      queued: 1,
+      messageId: "outbound-1"
     });
 
     await app.close();

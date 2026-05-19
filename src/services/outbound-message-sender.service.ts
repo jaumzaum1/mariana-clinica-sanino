@@ -28,7 +28,6 @@ export class OutboundMessageSenderService {
   ) {}
 
   async sendPending(limit = 25): Promise<OutboundSendSummary> {
-    const pendingMessages = await this.messagesRepository.findPendingOutboundDrafts(limit);
     const summary: OutboundSendSummary = {
       mode: this.options.whatsappMode,
       sendEnabled: this.options.sendWhatsappEnabled,
@@ -38,8 +37,21 @@ export class OutboundMessageSenderService {
       failed: 0
     };
 
+    if (!this.options.sendWhatsappEnabled) {
+      await this.auditLogService.create({
+        event: "outbound_send_skipped",
+        metadata: {
+          reason: "SEND_WHATSAPP_ENABLED=false",
+          mode: this.options.whatsappMode
+        }
+      });
+      return summary;
+    }
+
+    const pendingMessages = await this.messagesRepository.findPendingOutboundForSend(limit);
+
     for (const pending of pendingMessages) {
-      const message = await this.messagesRepository.markOutboundProcessing(pending.id);
+      const message = await this.messagesRepository.markOutboundSending(pending.id, crypto.randomUUID());
       if (!message) {
         continue;
       }
@@ -52,26 +64,21 @@ export class OutboundMessageSenderService {
     return summary;
   }
 
+  async queueLatestDraft(phone: string): Promise<OutboundDraftMessageRecord | null> {
+    const queued = await this.messagesRepository.queueLatestOutboundDraft(phone);
+
+    await this.auditLogService.create({
+      event: queued ? "outbound_draft_queued" : "outbound_draft_queue_empty",
+      phone,
+      metadata: {
+        messageId: queued?.id
+      }
+    });
+
+    return queued;
+  }
+
   private async processMessage(message: OutboundDraftMessageRecord): Promise<"sent" | "skipped" | "failed"> {
-    if (!this.options.sendWhatsappEnabled) {
-      await this.messagesRepository.markOutboundSkipped(message.id, {
-        skipped_reason: "SEND_WHATSAPP_ENABLED=false",
-        send_whatsapp_enabled: false,
-        whatsapp_mode: this.options.whatsappMode
-      });
-      await this.auditLogService.create({
-        event: "outbound_send_skipped",
-        phone: message.phone,
-        metadata: {
-          messageId: message.id,
-          reason: "SEND_WHATSAPP_ENABLED=false",
-          mode: this.options.whatsappMode
-        }
-      });
-
-      return "skipped";
-    }
-
     const destinationPhone =
       this.options.whatsappMode === "test" ? this.options.whatsappTestPhone : message.phone;
 

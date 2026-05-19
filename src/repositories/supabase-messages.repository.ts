@@ -17,10 +17,13 @@ interface MessageRow {
   sent_at?: string | null;
   provider_message_id?: string | null;
   send_error?: string | null;
+  locked_at?: string | null;
+  lock_id?: string | null;
+  send_attempts?: number;
 }
 
 const MESSAGE_COLUMNS =
-  "id, patient_id, phone, text, raw_payload, send_status, sent_at, provider_message_id, send_error";
+  "id, patient_id, phone, text, raw_payload, send_status, sent_at, provider_message_id, send_error, locked_at, lock_id, send_attempts";
 
 function toMessageRecord(row: MessageRow): MessageRecord {
   return {
@@ -38,7 +41,10 @@ function toOutboundRecord(row: MessageRow): OutboundDraftMessageRecord {
     sendStatus: row.send_status,
     sentAt: row.sent_at,
     providerMessageId: row.provider_message_id,
-    sendError: row.send_error
+    sendError: row.send_error,
+    lockedAt: row.locked_at,
+    lockId: row.lock_id,
+    sendAttempts: row.send_attempts ?? 0
   };
 }
 
@@ -106,7 +112,7 @@ export class SupabaseMessagesRepository implements MessagesRepository {
         raw_payload: {
           mariana: input.metadata
         },
-        send_status: "draft"
+        send_status: input.sendStatus ?? "draft"
       })
       .select("id, patient_id, phone, text")
       .single<MessageRow>();
@@ -118,13 +124,13 @@ export class SupabaseMessagesRepository implements MessagesRepository {
     return toMessageRecord(data);
   }
 
-  async findPendingOutboundDrafts(limit = 25): Promise<OutboundDraftMessageRecord[]> {
+  async findPendingOutboundForSend(limit = 5): Promise<OutboundDraftMessageRecord[]> {
     const { data, error } = await this.supabase
       .from("messages")
       .select(MESSAGE_COLUMNS)
       .eq("direction", "outbound")
       .is("sent_at", null)
-      .or("send_status.is.null,send_status.in.(draft,skipped,send_failed)")
+      .eq("send_status", "pending")
       .order("created_at", { ascending: true })
       .limit(limit)
       .returns<MessageRow[]>();
@@ -136,14 +142,17 @@ export class SupabaseMessagesRepository implements MessagesRepository {
     return data.map(toOutboundRecord);
   }
 
-  async markOutboundProcessing(messageId: string): Promise<OutboundDraftMessageRecord | null> {
+  async markOutboundSending(
+    messageId: string,
+    lockId: string
+  ): Promise<OutboundDraftMessageRecord | null> {
     const existing = await this.findOutboundById(messageId);
 
     if (
       !existing ||
       existing.sentAt ||
       existing.sendStatus === "sent" ||
-      existing.sendStatus === "processing"
+      existing.sendStatus !== "pending"
     ) {
       return null;
     }
@@ -151,16 +160,63 @@ export class SupabaseMessagesRepository implements MessagesRepository {
     const { data, error } = await this.supabase
       .from("messages")
       .update({
-        send_status: "processing",
+        send_status: "sending",
         send_error: null,
+        locked_at: new Date().toISOString(),
+        lock_id: lockId,
+        send_attempts: (existing.sendAttempts ?? 0) + 1,
         raw_payload: mergeRawPayload(existing.rawPayload, {
-          send_status: "processing",
-          processing_started_at: new Date().toISOString()
+          send_status: "sending",
+          lock_id: lockId,
+          sending_started_at: new Date().toISOString()
         })
       })
       .eq("id", messageId)
       .is("sent_at", null)
-      .or("send_status.is.null,send_status.neq.processing")
+      .eq("send_status", "pending")
+      .select(MESSAGE_COLUMNS)
+      .maybeSingle<MessageRow>();
+
+    if (error) {
+      throw error;
+    }
+
+    return data ? toOutboundRecord(data) : null;
+  }
+
+  async queueLatestOutboundDraft(phone: string): Promise<OutboundDraftMessageRecord | null> {
+    const { data: draft, error: selectError } = await this.supabase
+      .from("messages")
+      .select(MESSAGE_COLUMNS)
+      .eq("direction", "outbound")
+      .eq("phone", phone)
+      .eq("send_status", "draft")
+      .is("sent_at", null)
+      .order("created_at", { ascending: false })
+      .limit(1)
+      .maybeSingle<MessageRow>();
+
+    if (selectError) {
+      throw selectError;
+    }
+
+    if (!draft) {
+      return null;
+    }
+
+    const { data, error } = await this.supabase
+      .from("messages")
+      .update({
+        send_status: "pending",
+        send_error: null,
+        raw_payload: mergeRawPayload(draft.raw_payload, {
+          send_status: "pending",
+          queued_at: new Date().toISOString()
+        })
+      })
+      .eq("id", draft.id)
+      .eq("send_status", "draft")
+      .is("sent_at", null)
       .select(MESSAGE_COLUMNS)
       .maybeSingle<MessageRow>();
 
@@ -181,6 +237,8 @@ export class SupabaseMessagesRepository implements MessagesRepository {
       .update({
         send_status: "skipped",
         send_error: null,
+        locked_at: null,
+        lock_id: null,
         raw_payload: mergeRawPayload(existing?.rawPayload, {
           ...metadata,
           sent: false,
@@ -211,6 +269,8 @@ export class SupabaseMessagesRepository implements MessagesRepository {
         provider_message_id: providerMessageId,
         send_status: "sent",
         send_error: null,
+        locked_at: null,
+        lock_id: null,
         raw_payload: mergeRawPayload(existing?.rawPayload, {
           ...metadata,
           draft: false,
@@ -242,6 +302,8 @@ export class SupabaseMessagesRepository implements MessagesRepository {
       .update({
         send_status: "send_failed",
         send_error: errorMessage,
+        locked_at: null,
+        lock_id: null,
         raw_payload: mergeRawPayload(existing?.rawPayload, {
           ...metadata,
           sent: false,

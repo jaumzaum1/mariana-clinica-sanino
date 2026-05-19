@@ -2,7 +2,7 @@
 
 Fundação técnica do backend da Mariana, secretária médica por WhatsApp da Clínica Sanino.
 
-Esta etapa cria uma base modular, testável e extensível em TypeScript. O webhook da Z-API já persiste entrada no Supabase, batches prontos podem gerar respostas da Mariana em modo rascunho e o envio de drafts por Z-API é protegido por flags. Google Calendar ainda não é chamado.
+Esta etapa cria uma base modular, testável e extensível em TypeScript. O webhook da Z-API já persiste entrada no Supabase, batches prontos podem gerar respostas da Mariana e o envio por Z-API é protegido por fila explícita. Google Calendar ainda não é chamado.
 
 ## Stack
 
@@ -80,21 +80,39 @@ Para ver o rascunho no Supabase, abra a tabela `messages` e filtre:
 - `phone = 5561996531507`
 - `direction = outbound`
 
-O campo `raw_payload->mariana` deve conter `draft=true`, `sent=false` e `send_whatsapp_enabled=false`.
+O campo `send_status` controla a fila:
 
-Para processar envio de drafts pendentes:
+- `draft`: resposta gerada, não elegível para envio automático
+- `pending`: única condição elegível para `/internal/outbound/send-pending`
+- `sending`: envio em andamento
+- `sent`: enviada
+- `send_failed`: falhou e não será reenviada automaticamente
+- `skipped`: pulada intencionalmente
+
+Para enfileirar uma única draft, use a última draft daquele telefone:
+
+```bash
+curl -X POST http://localhost:3000/internal/outbound/queue-latest-draft \
+  -H "Content-Type: application/json" \
+  -d '{"phone":"5561996531507"}'
+```
+
+Para processar no máximo uma mensagem pendente:
 
 ```bash
 curl -X POST http://localhost:3000/internal/outbound/send-pending \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"limit":1}'
 ```
 
 No Supabase, verifique `messages`:
 
-- `send_status = skipped` quando `SEND_WHATSAPP_ENABLED=false`
+- `send_status = draft` para rascunhos não enfileirados
+- `send_status = pending` para itens explicitamente enfileirados
 - `send_status = sent`, `sent_at` e `provider_message_id` quando envio controlado funcionar
 - `send_status = send_failed` e `send_error` se a Z-API falhar
+
+Se `SEND_WHATSAPP_ENABLED=false`, `/internal/outbound/send-pending` não chama a Z-API e não transforma drafts antigas em pending.
 
 ## Rotas
 
@@ -102,7 +120,8 @@ No Supabase, verifique `messages`:
 - `POST /webhooks/zapi` normaliza telefone, salva paciente/mensagem, atualiza debounce e registra audit logs
 - `POST /internal/commands` permite testar comandos internos determinísticos
 - `POST /internal/batches/process-ready` processa batches prontos em `development`/`test`
-- `POST /internal/outbound/send-pending` processa drafts outbound pendentes com travas de segurança
+- `POST /internal/outbound/queue-latest-draft` marca apenas a última draft de um telefone como `pending`
+- `POST /internal/outbound/send-pending` processa somente mensagens `send_status=pending`
 
 ## Integrações
 

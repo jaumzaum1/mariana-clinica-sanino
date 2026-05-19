@@ -126,7 +126,7 @@ class FakeMessagesRepository implements MessagesRepository {
     return message;
   }
 
-  async findPendingOutboundDrafts(): Promise<OutboundDraftMessageRecord[]> {
+  async findPendingOutboundForSend(): Promise<OutboundDraftMessageRecord[]> {
     return this.outboundDrafts.map((message) => ({
       ...message,
       rawPayload: { mariana: message.metadata },
@@ -137,7 +137,10 @@ class FakeMessagesRepository implements MessagesRepository {
     }));
   }
 
-  async markOutboundProcessing(messageId: string): Promise<OutboundDraftMessageRecord | null> {
+  async markOutboundSending(
+    messageId: string,
+    lockId: string
+  ): Promise<OutboundDraftMessageRecord | null> {
     const message = this.outboundDrafts.find((item) => item.id === messageId);
     if (!message || message.metadata.sent) {
       return null;
@@ -146,11 +149,16 @@ class FakeMessagesRepository implements MessagesRepository {
     return {
       ...message,
       rawPayload: { mariana: message.metadata },
-      sendStatus: "processing",
+      sendStatus: "sending",
       sentAt: null,
       providerMessageId: null,
-      sendError: null
+      sendError: null,
+      lockId
     };
+  }
+
+  async queueLatestOutboundDraft(): Promise<OutboundDraftMessageRecord | null> {
+    return null;
   }
 
   async markOutboundSkipped(messageId: string): Promise<MessageRecord> {

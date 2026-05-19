@@ -85,11 +85,15 @@ class FakeMessagesRepository implements MessagesRepository {
     return message;
   }
 
-  async findPendingOutboundDrafts(): Promise<OutboundDraftMessageRecord[]> {
+  async findPendingOutboundForSend(): Promise<OutboundDraftMessageRecord[]> {
     return [];
   }
 
-  async markOutboundProcessing(): Promise<OutboundDraftMessageRecord | null> {
+  async markOutboundSending(): Promise<OutboundDraftMessageRecord | null> {
+    return null;
+  }
+
+  async queueLatestOutboundDraft(): Promise<OutboundDraftMessageRecord | null> {
     return null;
   }
 
