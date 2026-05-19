@@ -10,6 +10,7 @@ import { SupabaseMessagesRepository } from "../repositories/supabase-messages.re
 import { SupabasePatientsRepository } from "../repositories/supabase-patients.repository.js";
 import { batchesRoutes } from "../routes/batches.routes.js";
 import { commandsRoutes } from "../routes/commands.routes.js";
+import { conversationRoutes } from "../routes/conversation.routes.js";
 import { healthRoutes } from "../routes/health.routes.js";
 import { outboundRoutes } from "../routes/outbound.routes.js";
 import { schedulingRoutes } from "../routes/scheduling.routes.js";
@@ -134,6 +135,9 @@ export function buildApp(options: BuildAppOptions = {}): FastifyInstance {
   });
   app.register(commandsRoutes);
   app.register(batchesRoutes, {
+    conversationProcessorService: dependencies.conversationProcessorService
+  });
+  app.register(conversationRoutes, {
     conversationProcessorService: dependencies.conversationProcessorService
   });
   app.register(outboundRoutes, {

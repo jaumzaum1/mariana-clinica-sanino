@@ -146,6 +146,23 @@ curl -X POST http://localhost:3000/internal/scheduling/test-create-event \
   }'
 ```
 
+Para simular a conversa completa de agendamento em `development`/`test`, sem enviar WhatsApp real:
+
+```bash
+curl -X POST http://localhost:3000/internal/conversation/simulate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "phone":"5561996531507",
+    "messages":[
+      "Quero marcar terça-feira à tarde",
+      "Pode ser o segundo",
+      "João Maldonado, CPF 12345678900, nasci em 14/05/1990"
+    ]
+  }'
+```
+
+Essa rota processa as mensagens em sequência, salva rascunhos outbound e retorna `steps`, `finalStatus`, `appointmentId`, `calendarEventId` e `outboundMessages`.
+
 Para testar idempotência, rode o mesmo `curl` duas vezes. A segunda chamada valida se o evento ainda existe no Google Calendar:
 
 - se o evento existir e estiver ativo: retorna o mesmo `appointmentId`/`eventId` com `reused: true`;
@@ -201,10 +218,14 @@ No Google Calendar, confira:
 
 Para testar uma conversa que agenda, envie uma mensagem com pedido de consulta, processe o batch e veja no Supabase:
 
+- `patients.metadata->'conversation_memory'` com `last_offered_slots`, `selected_slot`, `pending_registration_fields`, `current_status`, `appointment_id` e `calendar_event_id`
 - `appointments.calendar_event_id`
+- `appointments.patient_id`
 - `appointments.status = scheduled`
 - `messages.direction = outbound`
-- `audit_logs.event = scheduling_evaluated`
+- `audit_logs_br.event` com `conversation_slots_offered`, `conversation_slot_selected`, `conversation_registration_completed`, `conversation_appointment_created` ou `conversation_appointment_reused`
+
+Para limpar dados de teste com segurança, prefira filtrar pelo telefone usado nos testes e revisar os registros antes de remover. Não apague dados de produção nem eventos reais sem confirmação manual.
 
 ## Rotas
 
@@ -212,6 +233,7 @@ Para testar uma conversa que agenda, envie uma mensagem com pedido de consulta, 
 - `POST /webhooks/zapi` normaliza telefone, salva paciente/mensagem, atualiza debounce e registra audit logs
 - `POST /internal/commands` permite testar comandos internos determinísticos
 - `POST /internal/batches/process-ready` processa batches prontos em `development`/`test`
+- `POST /internal/conversation/simulate` simula múltiplas mensagens de agendamento sem envio real
 - `POST /internal/outbound/queue-latest-draft` marca apenas a última draft de um telefone como `pending`
 - `POST /internal/outbound/send-pending` processa somente mensagens `send_status=pending`
 - `POST /internal/scheduling/available-slots` calcula slots disponíveis no Google Calendar
